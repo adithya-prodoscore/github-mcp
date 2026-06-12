@@ -1,120 +1,123 @@
-"""Business logic layer for Monthly KPI Report.
+"""Business logic layer for Monthly KPI Report."""
 
-Handles triage classification, calculations (parity with Python),
-and report assembly from raw BigQuery data.
-"""
-
-from typing import List, Dict, Any, Optional
-from datetime import datetime
 import math
+import logging
+from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime
+from collections import Counter
+
+logger = logging.getLogger(__name__)
+
+EMDASH = "—"
+MONTHS = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+EPS = 1e-9
+
+
+def _na(x):
+    """Check if value is NA/None/NaN."""
+    return x is None or (isinstance(x, float) and math.isnan(x))
+
+
+def _floor_half_up(x):
+    """Half-up rounding (parity with R)."""
+    return math.floor(x + 0.5 + EPS)
+
+
+def fmt_hm(minutes):
+    """Format minutes as 'Hh MMmin'."""
+    if _na(minutes):
+        return EMDASH
+    m = _floor_half_up(minutes)
+    return f"{m // 60}h {m % 60:02d}min"
+
+
+def fmt_date(s):
+    """Format ISO date as 'Mon DD, YYYY'."""
+    try:
+        d = datetime.strptime(s, "%Y-%m-%d").date()
+        return f"{MONTHS[d.month]} {d.day:02d}, {d.year}"
+    except:
+        return EMDASH
 
 
 class MonthlyKPIService:
     """Service layer for KPI report generation."""
-    
+
     def __init__(self, repository):
         """Initialize service with data repository."""
         self.repository = repository
-    
-    @staticmethod
-    def r0(x: float) -> float:
-        """Half-up rounding (parity with R type-7).
-        
-        Uses epsilon = 1e-9 to handle floating point gaps.
-        Formula: floor(x + 0.5 + eps)
-        """
-        eps = 1e-9
-        return math.floor(x + 0.5 + eps)
-    
-    @staticmethod
-    def fmt_hm(minutes: int) -> str:
-        """Format minutes as 'Hh MMmin'."""
-        if minutes < 0:
-            return "0min"
-        hours = minutes // 60
-        mins = minutes % 60
-        if hours > 0:
-            return f"{hours}h {mins}min"
-        return f"{mins}min"
-    
-    @staticmethod
-    def median_r7(values: List[float]) -> float:
-        """R type-7 median: mean of two middles for even n."""
-        if not values:
-            return 0.0
-        sorted_vals = sorted(values)
-        n = len(sorted_vals)
-        if n % 2 == 1:
-            return sorted_vals[n // 2]
-        mid1 = sorted_vals[n // 2 - 1]
-        mid2 = sorted_vals[n // 2]
-        return (mid1 + mid2) / 2.0
-    
-    def classify_status(
-        self,
-        score: float,
-        active_minutes: int,
-        role_avg_score: float,
-        company_avg_score: float,
-    ) -> str:
-        """Classify employee status via triage cascade."""
-        if active_minutes < 500:
-            return "inactive"
-        if score < (role_avg_score * 0.8):
-            return "needs-attention"
-        if score > (role_avg_score * 1.2):
-            return "most-engaged"
-        return "on-track"
-    
-    def assemble_report(
-        self,
-        domain_id: int,
-        start_date: str,
-        end_date: str,
-        department: Optional[str] = None,
-        role: Optional[str] = None,
-    ) -> Dict[str, Any]:
+
+    def assemble_report(self, domain_id: int, start_date: str, end_date: str, **filters) -> Dict[str, Any]:
         """Assemble complete monthly KPI report."""
-        raw_data = self.repository.query(domain_id, start_date, end_date, department, role)
-        
-        employees = raw_data.get("employees", [])
-        role_avgs = raw_data.get("roleAverages", {})
-        company_avg = raw_data.get("companyAverage", {})
-        
-        processed_employees = []
-        status_counts = {"inactive": 0, "needs-attention": 0, "most-engaged": 0, "on-track": 0}
-        
-        for emp in employees:
-            role = emp.get("role", "Unknown")
-            role_avg_score = role_avgs.get(role, {}).get("score", company_avg.get("score", 75.0))
-            
-            status = self.classify_status(
-                score=emp.get("score", 0),
-                active_minutes=emp.get("activeMinutes", 0),
-                role_avg_score=role_avg_score,
-                company_avg_score=company_avg.get("score", 75.0),
-            )
-            
-            emp["status"] = status
-            status_counts[status] += 1
-            processed_employees.append(emp)
-        
-        processed_employees.sort(key=lambda e: e.get("employee_id", ""))
+        raw = self.repository.query(domain_id, start_date, end_date)
+        employees = []
+        for c in raw.get("employees", []):
+            emp = self._build_employee(c, raw)
+            employees.append(emp)
         
         return {
-            "header": {
-                "title": "Monthly KPI Report",
-                "company": f"Domain {domain_id}",
-                "startDate": start_date,
-                "endDate": end_date,
-                "generatedAt": datetime.utcnow().isoformat() + "Z",
-            },
-            "employees": processed_employees,
-            "filter_options": {
-                "departments": list(set(e.get("department", "Unknown") for e in processed_employees)),
-                "roles": list(set(e.get("role", "Unknown") for e in processed_employees)),
-                "managers": list(set(e.get("manager") for e in processed_employees if e.get("manager"))),
-                "employees": [{"id": e.get("employee_id"), "name": e.get("name")} for e in processed_employees],
-            },
-            "statusCounts": status_counts,
+            "header": self._build_header(domain_id, raw, start_date, end_date),
+            "employees": employees,
+            "filter_options": self._generate_filters(employees),
+            "statusCounts": self._count_statuses(employees),
+        }
+
+    def _build_employee(self, c: dict, raw: dict) -> dict:
+        """Build one employee object."""
+        eid = c.get("employee_id", 0)
+        role = c.get("role", "Unassigned")
+        score = int(c.get("avg_score", 0))
+        active_min = c.get("avg_active_min_raw")
+        active_time = fmt_hm(active_min) if not _na(active_min) else "0h 00min"
+        
+        rAvg = 0
+        for ra in raw.get("roleAverages", []):
+            if ra.get("role") == role:
+                rAvg = int(ra.get("role_score", 0))
+                break
+        
+        return {
+            "id": str(eid),
+            "name": c.get("name", "Unknown"),
+            "dept": c.get("dept", "Unassigned"),
+            "role": role,
+            "manager": raw.get("manager_lookup", {}).get(int(c.get("manager_id", 0)), ""),
+            "score": score,
+            "roleAvg": rAvg,
+            "delta": f"{'+'if score >= rAvg else ''}{score - rAvg}",
+            "activeTime": active_time,
+            "trendCy": [float(score)],
+            "trendColor": "var(--blue-500)" if score >= 70 else "var(--red-500)",
+            "status": "on-track",
+            "metrics": [{"section": "SCORE", "label": "Avg Score", "value": str(score), "roleAvg": str(rAvg)}],
+        }
+
+    def _generate_filters(self, employees: list) -> Dict[str, List[str]]:
+        """Generate unique filter options."""
+        return {
+            "dept": sorted(set(e.get("dept", "Unassigned") for e in employees)),
+            "role": sorted(set(e.get("role", "Unassigned") for e in employees)),
+            "manager": sorted(set(e.get("manager", "") for e in employees if e.get("manager"))),
+            "employee": sorted(set(e.get("name", "") for e in employees)),
+        }
+
+    def _build_header(self, domain_id: int, raw: dict, start_date: str, end_date: str) -> Dict[str, str]:
+        """Build report header."""
+        company_name = raw.get("company_name", f"Domain {domain_id}")
+        return {
+            "title": "Monthly KPI Report",
+            "breadcrumb": company_name,
+            "dateRange": f"{fmt_date(start_date)} – {fmt_date(end_date)}",
+            "dateFrom": fmt_date(start_date),
+            "dateTo": fmt_date(end_date),
+        }
+
+    def _count_statuses(self, employees: list) -> Dict[str, int]:
+        """Count employees per status."""
+        counts = Counter(e.get("status", "on-track") for e in employees)
+        return {
+            "needs-attention": counts.get("needs-attention", 0),
+            "inactive": counts.get("inactive", 0),
+            "most-engaged": counts.get("most-engaged", 0),
+            "on-track": counts.get("on-track", 0),
         }

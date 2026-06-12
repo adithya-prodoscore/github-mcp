@@ -1,46 +1,31 @@
-"""FastAPI router for Monthly KPI Report endpoints."""
+"""FastAPI router for Monthly KPI Report."""
 
-from fastapi import APIRouter, Query, HTTPException
-from datetime import datetime
-from typing import Optional
-
+import logging
+from fastapi import APIRouter, HTTPException
+from .schemas import MonthlyKPIRequest, MonthlyKPIResponse
 from .repository import MonthlyKPIRepository
 from .service import MonthlyKPIService
 
-router = APIRouter(prefix="/api/monthly-kpi", tags=["monthly-kpi"])
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/monthly-kpi", tags=["monthly-kpi"])
 
 _repository = MonthlyKPIRepository()
 _service = MonthlyKPIService(_repository)
 
 
-@router.get("/report")
-async def get_monthly_kpi_report(
-    domain_id: int = Query(9, description="Prodoscore domain ID (default: 9)"),
-    start: str = Query(None, description="Start date (YYYY-MM-DD)"),
-    end: str = Query(None, description="End date (YYYY-MM-DD)"),
-    department: Optional[str] = Query(None, description="Filter by department"),
-    role: Optional[str] = Query(None, description="Filter by role"),
-):
-    """Get monthly KPI report for specified domain and date range."""
-    if not start or not end:
-        today = datetime.utcnow()
-        start = f"{today.year}-{today.month:02d}-01"
-        end = f"{today.year}-{today.month:02d}-28"
-    
+@router.post("/report", response_model=MonthlyKPIResponse)
+def generate_kpi_report(request: MonthlyKPIRequest) -> MonthlyKPIResponse:
+    """Generate a Monthly KPI Report."""
     try:
-        report = _service.assemble_report(
-            domain_id=domain_id,
-            start_date=start,
-            end_date=end,
-            department=department,
-            role=role,
-        )
-        return report
+        logger.info(f"[router] Generating KPI report: domain={request.domain_id}")
+        result = _service.assemble_report(request.domain_id, request.start_date, request.end_date)
+        return MonthlyKPIResponse(**result)
     except Exception as e:
+        logger.error(f"[router] Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/health")
-async def health_check():
+def health_check() -> dict:
     """Health check endpoint."""
-    return {"status": "healthy", "module": "monthly_kpi"}
+    return {"status": "ok", "service": "monthly-kpi"}

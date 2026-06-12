@@ -1,55 +1,76 @@
-"""Pydantic models for Monthly KPI Report.
+"""Pydantic schemas for Monthly KPI Report."""
 
-Data contracts matching employees.json shape per REAL_DATA_SPEC.md
-"""
-
-from typing import Optional, List
 from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any
 
 
-class MetricRecord(BaseModel):
-    """Individual metric record in a section."""
-    section: str = Field(..., description="Section name (e.g., SCORE, WORK HABITS)")
-    label: str = Field(..., description="Metric label (e.g., Productivity Score)")
-    value: float = Field(..., description="Metric value")
-    roleAvg: Optional[float] = Field(None, description="Role-level average")
-    companyAvg: Optional[float] = Field(None, description="Company-level average")
+class MonthlyKPIRequest(BaseModel):
+    """Request parameters for monthly KPI report."""
+    domain_id: int = Field(default=9, description="Prodoscore domain ID")
+    start_date: str = Field(default="2026-05-01", description="Report start (YYYY-MM-DD)")
+    end_date: str = Field(default="2026-05-29", description="Report end (YYYY-MM-DD)")
+    department: Optional[str] = Field(default=None, description="Optional department filter")
+    role: Optional[str] = Field(default=None, description="Optional role filter")
+    manager: Optional[str] = Field(default=None, description="Optional manager filter")
+    employee: Optional[str] = Field(default=None, description="Optional employee filter")
 
 
-class EmployeeKPI(BaseModel):
-    """Complete KPI profile for a single employee."""
-    employee_id: str
+class EmployeeMetric(BaseModel):
+    """Single metric entry in employee profile."""
+    section: str
+    label: str
+    value: str
+    roleAvg: Optional[str] = None
+
+
+class EmployeeRecord(BaseModel):
+    """Per-employee record in KPI report."""
+    id: str
     name: str
+    dept: str
     role: str
-    manager: Optional[str] = None
-    department: Optional[str] = None
-    email: Optional[str] = None
-    score: float
-    activeMinutes: int
-    status: str  # inactive | needs-attention | most-engaged | on-track
-    metrics: List[MetricRecord]
+    manager: str
+    score: int
+    roleAvg: int
+    delta: str
+    activeTime: str
+    trendCy: List[float]
+    trendColor: str
+    status: str
+    metrics: List[EmployeeMetric]
+
+
+class HeaderInfo(BaseModel):
+    """Report header metadata."""
+    title: str
+    breadcrumb: str
+    dateRange: str
+    dateFrom: str
+    dateTo: str
 
 
 class FilterOptions(BaseModel):
-    """Available filter options for the report."""
-    departments: List[str]
-    roles: List[str]
-    managers: List[str]
-    employees: List[dict]  # {id, name}
+    """Available filter values."""
+    dept: List[str]
+    role: List[str]
+    manager: List[str]
+    employee: List[str]
 
 
-class ReportHeader(BaseModel):
-    """Metadata for the report."""
-    title: str
-    company: str
-    startDate: str  # YYYY-MM-DD
-    endDate: str    # YYYY-MM-DD
-    generatedAt: str  # ISO 8601
+class StatusCounts(BaseModel):
+    """Status distribution counts."""
+    needs_attention: int = Field(default=0, alias="needs-attention")
+    inactive: int = Field(default=0)
+    most_engaged: int = Field(default=0, alias="most-engaged")
+    on_track: int = Field(default=0, alias="on-track")
+
+    class Config:
+        populate_by_name = True
 
 
-class MonthlyKPIReport(BaseModel):
-    """Complete Monthly KPI Report."""
-    header: ReportHeader
-    employees: List[EmployeeKPI]
+class MonthlyKPIResponse(BaseModel):
+    """Complete monthly KPI report response."""
+    header: HeaderInfo
+    employees: List[EmployeeRecord]
     filter_options: FilterOptions
-    statusCounts: dict  # {status: count}
+    statusCounts: StatusCounts

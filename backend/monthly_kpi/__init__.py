@@ -1,8 +1,4 @@
-"""Monthly KPI Report module.
-
-FastAPI router for monthly KPI report generation and retrieval.
-Integrates with BigQuery for data access and service layer for business logic.
-"""
+"""Monthly KPI Report Module."""
 
 from .router import router
 
